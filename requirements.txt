@@ -1,0 +1,11 @@
+# --- Core (required) ---
+requests>=2.31
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# --- Optional: SaaS / API serving (workflows/saas_automation) ---
+# fastapi>=0.110
+# uvicorn>=0.29
+
+# --- Optional: trading signals data source (workflows/trading_signals) ---
+# yfinance>=0.2.40

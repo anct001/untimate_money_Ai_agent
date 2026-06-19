@@ -1,0 +1,56 @@
+# Copy to config/config.yaml to override defaults. All fields are optional;
+# anything omitted falls back to the defaults baked into moneyagent/config.py.
+
+# Providers are tried top-to-bottom for a given task tier. The router skips
+# any provider that has no API key, is offline, or has hit its daily quota.
+providers:
+  # Local first: free, private, no quota. Great for "light" tasks.
+  - name: ollama
+    type: ollama
+    enabled: true
+    tiers: [light]            # which task tiers this provider may handle
+    models:
+      light: llama3.2:3b      # pull with: ollama pull llama3.2:3b
+      heavy: llama3.1:8b
+    daily_request_limit: 0    # 0 = unlimited
+
+  - name: groq
+    type: openai_compat
+    enabled: true
+    tiers: [light, heavy]
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    models:
+      light: llama-3.1-8b-instant
+      heavy: llama-3.3-70b-versatile
+    daily_request_limit: 1000  # respect the free-tier limit; tune to your plan
+
+  - name: gemini
+    type: gemini
+    enabled: true
+    tiers: [light, heavy]
+    api_key_env: GEMINI_API_KEY
+    models:
+      light: gemini-2.0-flash-lite
+      heavy: gemini-2.0-flash
+    daily_request_limit: 1500
+
+  - name: openrouter
+    type: openai_compat
+    enabled: true
+    tiers: [heavy]
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    models:
+      heavy: meta-llama/llama-3.3-70b-instruct:free
+    daily_request_limit: 50
+
+# Where the agent writes outputs and tracks usage/ledger.
+paths:
+  data_dir: data
+  output_dir: outputs
+
+# Honest goal tracking. Revenue is recorded from REAL completed paid work
+# (see `python -m moneyagent ledger`), never fabricated by the agent.
+goal:
+  monthly_target_usd: 10000
