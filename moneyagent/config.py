@@ -129,7 +129,7 @@ def load_config(path: str | os.PathLike | None = None, root: str | os.PathLike |
     if config_path.exists():
         if yaml is None:
             raise RuntimeError("PyYAML is required to read config.yaml. pip install PyYAML")
-        with open(config_path, "r", encoding="utf-8") as fh:
+        with open(config_path, encoding="utf-8") as fh:
             user_cfg = yaml.safe_load(fh) or {}
         merged = _deep_merge(merged, user_cfg)
 

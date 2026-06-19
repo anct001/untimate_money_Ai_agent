@@ -1,8 +1,8 @@
 """Tool registry shared by the ReAct agent."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 
 @dataclass

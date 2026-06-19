@@ -21,15 +21,18 @@ quota trong ngày. Bạn cấu hình bao nhiêu provider tùy thích — có cá
 ## Cài đặt nhanh
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env          # điền API key của (các) nguồn bạn có — không cần đủ hết
+pip install -e .                 # hoặc: pip install -e ".[saas,trading,dev]"
+cp .env.example .env             # điền API key của (các) nguồn bạn có — không cần đủ hết
 cp config/config.example.yaml config/config.yaml   # (tùy chọn) tinh chỉnh
 
 # Local model (tùy chọn, miễn phí):
 #   ollama serve && ollama pull llama3.2:3b
 
-python -m moneyagent providers   # kiểm tra nguồn nào đang sẵn sàng
+moneyagent providers             # (hoặc: python -m moneyagent providers)
 ```
+
+Sau khi `pip install -e .` bạn có lệnh `moneyagent` trực tiếp. Các extras:
+`saas` (FastAPI/uvicorn/stripe), `trading` (yfinance), `dev` (pytest/ruff).
 
 ## Kiến trúc
 
@@ -77,16 +80,17 @@ Tùy chỉnh trong `config.yaml` mục `router:` (`max_retries`, `cooldown_secon
 ## Lệnh CLI
 
 ```bash
-python -m moneyagent providers                 # trạng thái, quota & chi phí từng nguồn
-python -m moneyagent chat "viết email xin lỗi khách"
-python -m moneyagent agent "tra cứu giá Bitcoin hôm nay và tính 3% của nó"  # ReAct + tool
-python -m moneyagent tools                      # liệt kê tool agent dùng được
-python -m moneyagent content --topic "Lợi ích của đạp xe" --words 700 --language Vietnamese
-python -m moneyagent signals --prices 10,11,12,11,13,14,...   # hoặc --ticker BTC-USD (cần yfinance)
-python -m moneyagent ledger                    # tiến độ tháng này
-python -m moneyagent ledger --add --source content --desc "blog cho khách A" --amount 150 --status paid
-python -m moneyagent autopilot --jobs config/jobs.yaml --once   # chạy job; bỏ --once để chạy liên tục
-python -m moneyagent serve                     # chạy SaaS API (cần fastapi uvicorn)
+moneyagent providers                 # trạng thái, quota & chi phí từng nguồn
+moneyagent chat "viết email xin lỗi khách"
+moneyagent agent "tra cứu giá Bitcoin hôm nay và tính 3% của nó"   # ReAct + tool
+moneyagent tools                     # liệt kê tool agent dùng được
+moneyagent crew "có nên ra mắt sản phẩm X?" --roles researcher,skeptic,strategist
+moneyagent content --topic "Lợi ích của đạp xe" --words 700 --language Vietnamese
+moneyagent signals --prices 10,11,12,11,13,14,...   # hoặc --ticker BTC-USD (cần yfinance)
+moneyagent ledger                    # tiến độ tháng này
+moneyagent ledger --add --source content --desc "blog cho khách A" --amount 150 --status paid
+moneyagent autopilot --jobs config/jobs.yaml --once   # chạy job; bỏ --once để chạy liên tục
+moneyagent serve                     # chạy SaaS API (cần extras saas)
 ```
 
 ### Autopilot — chạy tự động (có guardrail)
@@ -95,14 +99,46 @@ python -m moneyagent serve                     # chạy SaaS API (cần fastapi 
 theo `every_seconds`/`max_runs`, **tôn trọng quota + ngân sách**, ghi kết quả ra `outputs/`
 và log vào `data/memory.jsonl`. **Không tự động đăng/gửi cho khách** — bạn vẫn duyệt rồi giao.
 
+### Crew — nhiều agent phối hợp
+
+`crew` chạy nhiều agent với vai trò khác nhau (researcher / skeptic / strategist / risk) rồi
+một agent tổng hợp lại — bắt lỗi tốt hơn một lượt đơn lẻ (theo pattern CrewAI / ai-hedge-fund).
+
+### SaaS: bán dịch vụ qua API (auth + plan + Stripe tùy chọn)
+
+`moneyagent serve` (cần `pip install -e ".[saas]"`) dựng FastAPI với:
+
+- **API-key auth** qua header `X-API-Key`. Cấu hình key:plan bằng biến môi trường
+  `MONEYAGENT_API_KEYS="key1:pro,key2:free"`, hoặc file `data/api_keys.json`. Nếu chưa cấu
+  hình, service tự sinh **một dev key (plan pro)** và in ra khi khởi động.
+- **Hạn mức theo plan** (`free`/`starter`/`pro`) + **rate-limit/phút**, đếm theo tháng tại
+  `data/saas_usage.json`.
+- **Stripe Checkout** opt-in: đặt `STRIPE_API_KEY` để bật `/v1/checkout`; chưa đặt thì billing
+  tắt an toàn (không gọi mạng).
+
+Endpoint: `GET /health`, `POST /v1/run`, `GET /v1/usage`, `POST /v1/checkout`.
+
+```bash
+# Docker
+docker build -t moneyagent .
+docker run -p 8000:8000 --env-file .env moneyagent
+
+# thử (thay <KEY> bằng dev key in ra ở log khởi động)
+curl -s localhost:8000/health
+curl -s -X POST localhost:8000/v1/run -H "X-API-Key: <KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"job":"summarize","input_text":"văn bản dài..."}'
+```
+
 ## Ba hướng kiếm tiền (hợp pháp)
 
 1. **Freelance / Content** (`content.py`) — agent tạo **bản nháp** (bài viết, dịch, rewrite)
    để bạn fact-check & biên tập rồi giao cho khách. Có cảnh báo `[verify]` ở chỗ cần kiểm chứng.
    *Bạn vẫn là người chịu trách nhiệm và giao hàng.*
-2. **SaaS automation** (`saas_automation.py`) — đóng gói một việc lặp đi lặp lại (tóm tắt,
-   nháp trả lời…) thành **API tính phí subscription**. Module cho sẵn lõi `request -> agent ->
-   response`; bạn thêm auth, billing (Stripe), rate-limit, UI.
+2. **SaaS automation** (`saas_automation.py` + `billing.py`) — đóng gói một việc lặp đi lặp
+   lại (tóm tắt, nháp trả lời…) thành **API tính phí subscription**. Đã có sẵn **auth bằng
+   API-key, hạn mức theo plan, rate-limit và Stripe Checkout (opt-in)** + Dockerfile để deploy.
+   Bạn chỉ cần thêm UI/landing page và bật `STRIPE_API_KEY`.
 3. **Trading signals** (`trading_signals.py`) — tính chỉ báo kỹ thuật minh bạch (SMA, RSI,
    trend) và viết bản tin **giáo dục, có cảnh báo rủi ro**. **Không bao giờ tự đặt lệnh tiền thật.**
 
@@ -115,8 +151,11 @@ duy nhất để "$10k/tháng" có ý nghĩa: dựa trên số liệu thật.
 ## Test
 
 ```bash
-python -m pytest -q     # 23 test, chạy offline, không cần mạng (dùng fake/scripted provider)
+pytest                  # 41 test, chạy offline (fake/scripted provider; test API tự bỏ qua nếu thiếu fastapi)
+ruff check moneyagent tests
 ```
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) chạy lint + test trên Python 3.10/3.11/3.12.
 
 ## Giới hạn & nguyên tắc
 
@@ -135,10 +174,13 @@ OpenManus** (tool access, chạy liên tục, bộ nhớ):
 - ✅ ToolAgent kiểu **ReAct** (provider-agnostic, chạy cả với local model nhỏ).
 - ✅ Bộ tool an toàn (calculator/read_file sandbox/web_search/http_get).
 - ✅ **Autopilot** scheduler + bộ nhớ bền vững để chạy workflow tự động có guardrail.
+- ✅ **Crew** đa-agent (researcher/skeptic/strategist/risk) + tổng hợp.
+- ✅ **SaaS thật**: API-key auth, plan, rate-limit, Stripe Checkout (opt-in), Dockerfile.
+- ✅ Packaging (`pip install` + lệnh `moneyagent`), CI GitHub Actions, lint ruff, 41 test.
 
 ## Roadmap gợi ý tiếp theo
 
 - Thêm provider free khác (Cerebras, Together) — chỉ cần thêm block vào config.
-- Multi-agent "crew" (nhiều persona) cho phân tích trading (kiểu ai-hedge-fund).
-- Tích hợp Stripe + auth cho hướng SaaS để bán subscription thật.
+- Stripe webhook để tự nâng/hạ plan khi thanh toán thay đổi.
+- UI/landing page cho SaaS.
 - Vector memory (embeddings) thay cho memory JSONL hiện tại.

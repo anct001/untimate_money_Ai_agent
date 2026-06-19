@@ -21,6 +21,7 @@ import sys
 from .agent import Agent, ToolAgent
 from .cache import PromptCache
 from .config import Config, load_config
+from .crew import Crew
 from .ledger import Ledger
 from .router import LLMRouter
 from .tools import default_registry
@@ -86,6 +87,18 @@ def cmd_agent(args) -> int:
         print(f"\n--- transcript ({result.steps} steps) ---", file=sys.stderr)
         for line in result.transcript:
             print(line, file=sys.stderr)
+    return 0
+
+
+def cmd_crew(args) -> int:
+    router = _router(args)
+    names = [r.strip() for r in args.roles.split(",") if r.strip()]
+    crew = Crew.from_names(router, names)
+    result = crew.run(args.task)
+    if args.verbose:
+        for name, view in result.perspectives.items():
+            print(f"--- {name} ---\n{view}\n", file=sys.stderr)
+    print(result.synthesis)
     return 0
 
 
@@ -205,6 +218,12 @@ def build_parser() -> argparse.ArgumentParser:
     tl = sub.add_parser("tools", help="list available agent tools")
     tl.add_argument("--no-network", action="store_true")
     tl.set_defaults(func=cmd_tools)
+
+    cr = sub.add_parser("crew", help="multi-agent crew (roles + synthesis)")
+    cr.add_argument("task")
+    cr.add_argument("--roles", default="researcher,skeptic,strategist",
+                    help="comma-separated: researcher,skeptic,strategist,risk")
+    cr.set_defaults(func=cmd_crew)
 
     ct = sub.add_parser("content", help="draft client content")
     ct.add_argument("--topic", required=True)

@@ -8,11 +8,11 @@ The framework is the product. Earning money is up to the *workflows* you plug
 in and the real, lawful work they help you deliver — see workflows/.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .config import Config, load_config
+from .providers.base import CompletionResult, Message
 from .router import LLMRouter
-from .providers.base import Message, CompletionResult
 
 __all__ = [
     "Config",

@@ -8,9 +8,11 @@ auth, billing (Stripe), rate limiting and a UI on top.
 
 FastAPI is optional. `process_request` works with zero web deps so you can also
 wire it into a queue, a cron job, or a CLI.
-"""
-from __future__ import annotations
 
+NOTE: this module intentionally does NOT use `from __future__ import annotations`.
+FastAPI must resolve the Pydantic request models at runtime, and stringized
+(deferred) annotations on models defined in a local scope break that resolution.
+"""
 from dataclasses import dataclass
 
 from ..agent import Agent
@@ -57,32 +59,83 @@ def process_request(req: ServiceRequest, router: LLMRouter | None = None) -> dic
 
 
 def create_app():  # pragma: no cover - exercised only when FastAPI is installed
-    """Build a FastAPI app exposing the jobs. `pip install fastapi uvicorn`."""
+    """Build a FastAPI app exposing the jobs, with API-key auth, per-plan quotas,
+    rate limiting and an optional Stripe checkout endpoint.
+
+    `pip install fastapi uvicorn` (and `stripe` if you enable billing).
+    """
     try:
-        from fastapi import FastAPI, HTTPException
+        from fastapi import Depends, FastAPI, Header, HTTPException
         from pydantic import BaseModel
     except ImportError as exc:
         raise RuntimeError("pip install fastapi uvicorn to serve the SaaS app") from exc
 
-    app = FastAPI(title="moneyagent automation", version="0.1.0")
-    router = LLMRouter(load_config())
+    from ..billing import PLANS, KeyStore, UsageMeter, create_checkout_session
+
+    cfg = load_config()
+    cfg.ensure_dirs()
+    router = LLMRouter(cfg)
+    keystore = KeyStore.from_env_or_file(cfg.data_dir / "api_keys.json")
+    meter = UsageMeter(cfg.data_dir / "saas_usage.json")
+
+    app = FastAPI(title="moneyagent automation", version="0.2.0")
+
+    if any(rec.get("label") == "auto-dev" for rec in keystore.keys.values()):
+        dev_key = next(iter(keystore.keys))
+        print(f"[moneyagent] No API keys configured. Dev key (pro plan): {dev_key}")
 
     class JobIn(BaseModel):
         job: str
         input_text: str
         instructions: str = ""
 
+    class CheckoutIn(BaseModel):
+        plan: str
+        success_url: str
+        cancel_url: str
+
+    def authenticate(x_api_key: str = Header(default="")):
+        rec = keystore.verify(x_api_key)
+        if rec is None:
+            raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
+        plan = PLANS.get(rec["plan"], PLANS["free"])
+        if meter.rate_limited(x_api_key, plan["rate_per_minute"]):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        if meter.over_monthly_limit(x_api_key, plan["monthly_requests"]):
+            raise HTTPException(status_code=402, detail="monthly plan limit reached; upgrade plan")
+        return x_api_key, rec
+
     @app.get("/health")
     def health():
-        return {"status": "ok", "jobs": sorted(JOB_PROMPTS)}
+        return {"status": "ok", "jobs": sorted(JOB_PROMPTS), "plans": sorted(PLANS)}
 
     @app.post("/v1/run")
-    def run(body: JobIn):
+    def run(body: JobIn, auth=Depends(authenticate)):
+        key, _rec = auth
         try:
-            return process_request(
+            result = process_request(
                 ServiceRequest(body.job, body.input_text, body.instructions), router
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        meter.record(key)
+        return result
+
+    @app.get("/v1/usage")
+    def usage(auth=Depends(authenticate)):
+        key, rec = auth
+        plan = PLANS.get(rec["plan"], PLANS["free"])
+        return {
+            "plan": rec["plan"],
+            "used_this_month": meter.count_month(key),
+            "monthly_limit": plan["monthly_requests"],
+        }
+
+    @app.post("/v1/checkout")
+    def checkout(body: CheckoutIn):
+        try:
+            return create_checkout_session(body.plan, body.success_url, body.cancel_url)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return app

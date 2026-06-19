@@ -28,7 +28,7 @@ def _rsi(values: list[float], period: int = 14) -> float | None:
     if len(values) <= period:
         return None
     gains, losses = [], []
-    for prev, cur in zip(values[-period - 1 : -1], values[-period:]):
+    for prev, cur in zip(values[-period - 1 : -1], values[-period:], strict=False):
         change = cur - prev
         gains.append(max(change, 0.0))
         losses.append(max(-change, 0.0))
