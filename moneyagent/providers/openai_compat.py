@@ -9,7 +9,14 @@ import os
 
 import requests
 
-from .base import CompletionResult, Message, Provider, ProviderError
+from .base import (
+    CompletionResult,
+    Message,
+    Provider,
+    ProviderError,
+    TransientError,
+    error_for_status,
+)
 
 
 class OpenAICompatProvider(Provider):
@@ -62,12 +69,10 @@ class OpenAICompatProvider(Provider):
                 timeout=timeout,
             )
         except requests.RequestException as exc:
-            raise ProviderError(f"{self.name}: request failed: {exc}") from exc
+            raise TransientError(f"{self.name}: request failed: {exc}") from exc
 
         if resp.status_code != 200:
-            raise ProviderError(
-                f"{self.name}: HTTP {resp.status_code}: {resp.text[:300]}"
-            )
+            raise error_for_status(self.name, resp.status_code, resp.text)
 
         data = resp.json()
         try:

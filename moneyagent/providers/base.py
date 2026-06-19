@@ -9,6 +9,30 @@ class ProviderError(RuntimeError):
     """Raised when a provider call fails (network, auth, quota, bad response)."""
 
 
+class RateLimitError(ProviderError):
+    """HTTP 429 / quota exhausted. Router marks the provider spent for the day."""
+
+
+class AuthError(ProviderError):
+    """HTTP 401/403 / bad key. Router disables the provider for the session."""
+
+
+class TransientError(ProviderError):
+    """Network/timeout/5xx. Router retries with backoff before falling back."""
+
+
+def error_for_status(name: str, status: int, body: str) -> ProviderError:
+    """Map an HTTP status code to the right ProviderError subclass."""
+    msg = f"{name}: HTTP {status}: {body[:300]}"
+    if status == 429:
+        return RateLimitError(msg)
+    if status in (401, 403):
+        return AuthError(msg)
+    if status >= 500:
+        return TransientError(msg)
+    return ProviderError(msg)
+
+
 @dataclass
 class Message:
     role: str  # "system" | "user" | "assistant"

@@ -1,5 +1,13 @@
 """LLM provider implementations."""
-from .base import Provider, Message, CompletionResult, ProviderError
+from .base import (
+    Provider,
+    Message,
+    CompletionResult,
+    ProviderError,
+    RateLimitError,
+    AuthError,
+    TransientError,
+)
 from .factory import build_provider
 
 __all__ = [
@@ -7,5 +15,8 @@ __all__ = [
     "Message",
     "CompletionResult",
     "ProviderError",
+    "RateLimitError",
+    "AuthError",
+    "TransientError",
     "build_provider",
 ]

@@ -83,3 +83,98 @@ class Agent:
         )
         steps.append("revised")
         return AgentResult(output=final, plan=plan, critique=critique, steps=steps)
+
+
+# --------------------------------------------------------------------------
+# Tool-using ReAct agent (provider-agnostic: works via prompting, so even a
+# small local model with no native function-calling can drive tools).
+# --------------------------------------------------------------------------
+
+REACT_SYSTEM = """You are a careful, honest agent that can use tools to do real, lawful work.
+
+Available tools:
+{tools}
+
+Work in a loop. Each turn output EXACTLY ONE of these two blocks, nothing else:
+
+THOUGHT: <your reasoning>
+ACTION: <one tool name from the list>
+ACTION_INPUT: <the input string for that tool>
+
+— or, when you have the answer —
+
+THOUGHT: <your reasoning>
+FINAL: <the complete answer for the user>
+
+Rules: use real tool output, never invent it. Refuse spam, deception, or anything
+that violates a platform's terms. Keep going until you can give FINAL."""
+
+
+@dataclass
+class ToolAgentResult:
+    answer: str
+    transcript: list[str] = field(default_factory=list)
+    steps: int = 0
+
+
+def parse_react(text: str) -> dict:
+    """Parse one ReAct turn into {'final': str} or {'action','input'}."""
+    if "FINAL:" in text:
+        return {"final": text.split("FINAL:", 1)[1].strip()}
+
+    action = input_ = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("ACTION:"):
+            action = stripped.split(":", 1)[1].strip()
+        elif stripped.upper().startswith("ACTION_INPUT:"):
+            input_ = line.split(":", 1)[1].strip()
+    if action is not None:
+        return {"action": action, "input": input_ or ""}
+    return {"final": text.strip()}  # model didn't follow format; treat as answer
+
+
+class ToolAgent:
+    def __init__(self, router: LLMRouter, registry, *, max_steps: int = 6, tier: str = "heavy"):
+        self.router = router
+        self.registry = registry
+        self.max_steps = max_steps
+        self.tier = tier
+        self.system_prompt = REACT_SYSTEM.format(tools=registry.describe())
+
+    def run(self, task: str) -> ToolAgentResult:
+        messages = [Message("system", self.system_prompt), Message("user", f"TASK: {task}")]
+        transcript: list[str] = []
+
+        for step in range(1, self.max_steps + 1):
+            reply = self.router.complete(
+                messages, tier=self.tier, max_tokens=900, temperature=0.3
+            ).text.strip()
+            transcript.append(reply)
+            parsed = parse_react(reply)
+
+            if "final" in parsed:
+                return ToolAgentResult(answer=parsed["final"], transcript=transcript, steps=step)
+
+            tool = self.registry.get(parsed["action"])
+            if tool is None:
+                observation = (
+                    f"ERROR: unknown tool '{parsed['action']}'. "
+                    f"Choose from: {self.registry.names()}"
+                )
+            else:
+                try:
+                    observation = tool.run(parsed["input"])
+                except Exception as exc:  # noqa: BLE001 - feed the error back to the model
+                    observation = f"ERROR running {tool.name}: {exc}"
+
+            messages.append(Message("assistant", reply))
+            messages.append(Message("user", f"OBSERVATION: {observation}"))
+            transcript.append(f"OBSERVATION: {observation}")
+
+        # Out of steps: ask for a best-effort final answer.
+        messages.append(Message("user", "Stop using tools. Give your FINAL answer now."))
+        final = self.router.complete(messages, tier=self.tier, max_tokens=900).text.strip()
+        answer = parse_react(final).get("final", final)
+        transcript.append(final)
+        return ToolAgentResult(answer=answer, transcript=transcript, steps=self.max_steps)

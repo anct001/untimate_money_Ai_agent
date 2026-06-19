@@ -42,9 +42,14 @@ moneyagent/
     gemini_provider.py   # Google Gemini REST
     ollama_provider.py   # local
     factory.py
-  router.py              # LLMRouter: chọn tier + quota + fallback
-  usage.py               # đếm request/ngày, tôn trọng giới hạn free-tier
-  agent.py               # vòng lặp: plan -> draft -> tự phản biện -> hoàn thiện
+  router.py              # LLMRouter: tier + quota + fallback + retry/backoff + budget
+  usage.py               # đếm request/ngày + chi phí USD, tôn trọng giới hạn free-tier
+  pricing.py             # bảng giá USD/1M token (model free = 0) để ước tính chi phí
+  cache.py               # cache prompt trên đĩa -> tiết kiệm quota
+  agent.py               # Agent (plan->draft->review) + ToolAgent (ReAct dùng tool)
+  tools/                 # bộ tool an toàn: calculator, read_file, web_search, http_get
+  memory.py              # bộ nhớ bền vững (JSONL) cho các lần chạy tự động
+  jobs.py                # Autopilot: chạy workflow theo lịch, có guardrail
   ledger.py              # sổ doanh thu THẬT, tiến độ tới mục tiêu
   workflows/             # các plugin kiếm tiền hợp pháp
     content.py           #   1) freelance / content (tạo bản nháp để bạn duyệt)
@@ -55,19 +60,40 @@ moneyagent/
 
 Tác vụ được gắn nhãn **`light`** (rẻ, hợp local) hoặc **`heavy`** (cần model mạnh).
 Router thử các provider theo thứ tự trong config, bỏ qua cái nào bị tắt / không key /
-offline / hết quota, và fallback khi lỗi.
+offline / hết quota / đang cooldown / rate-limit, và fallback khi lỗi.
+
+### Khả năng chịu lỗi & chi phí (theo pattern LiteLLM)
+
+- **Retry + exponential backoff** cho lỗi tạm thời (5xx / mạng) trước khi fallback.
+- **429 (rate-limit)** → đánh dấu provider "hết quota trong ngày"; **lỗi auth** → tắt provider
+  cả phiên; lỗi khác → **cooldown** ngắn rồi thử lại.
+- **Ước tính chi phí USD** mỗi call (model free = $0) + **giới hạn ngân sách/ngày** chặn cứng
+  chi tiêu nếu bạn lỡ dùng model trả phí.
+- **Cache prompt**: yêu cầu giống hệt được trả từ đĩa, không tốn quota.
+
+Tùy chỉnh trong `config.yaml` mục `router:` (`max_retries`, `cooldown_seconds`,
+`daily_budget_usd`, `cache`).
 
 ## Lệnh CLI
 
 ```bash
-python -m moneyagent providers                 # trạng thái & quota từng nguồn
-python -m moneyagent chat "viết email xin lỗi khách" 
+python -m moneyagent providers                 # trạng thái, quota & chi phí từng nguồn
+python -m moneyagent chat "viết email xin lỗi khách"
+python -m moneyagent agent "tra cứu giá Bitcoin hôm nay và tính 3% của nó"  # ReAct + tool
+python -m moneyagent tools                      # liệt kê tool agent dùng được
 python -m moneyagent content --topic "Lợi ích của đạp xe" --words 700 --language Vietnamese
 python -m moneyagent signals --prices 10,11,12,11,13,14,...   # hoặc --ticker BTC-USD (cần yfinance)
 python -m moneyagent ledger                    # tiến độ tháng này
 python -m moneyagent ledger --add --source content --desc "blog cho khách A" --amount 150 --status paid
+python -m moneyagent autopilot --jobs config/jobs.yaml --once   # chạy job; bỏ --once để chạy liên tục
 python -m moneyagent serve                     # chạy SaaS API (cần fastapi uvicorn)
 ```
+
+### Autopilot — chạy tự động (có guardrail)
+
+`autopilot` đọc `config/jobs.yaml` (mẫu: `config/jobs.example.yaml`) và chạy các workflow
+theo `every_seconds`/`max_runs`, **tôn trọng quota + ngân sách**, ghi kết quả ra `outputs/`
+và log vào `data/memory.jsonl`. **Không tự động đăng/gửi cho khách** — bạn vẫn duyệt rồi giao.
 
 ## Ba hướng kiếm tiền (hợp pháp)
 
@@ -89,7 +115,7 @@ duy nhất để "$10k/tháng" có ý nghĩa: dựa trên số liệu thật.
 ## Test
 
 ```bash
-python -m pytest -q     # chạy offline, không cần mạng (dùng fake provider)
+python -m pytest -q     # 23 test, chạy offline, không cần mạng (dùng fake/scripted provider)
 ```
 
 ## Giới hạn & nguyên tắc
@@ -99,9 +125,20 @@ python -m pytest -q     # chạy offline, không cần mạng (dùng fake provid
 - Mọi đầu ra hướng tới khách hàng/công chúng đều cần **người duyệt** trước.
 - Đây là công cụ tăng tốc công việc thật, không phải máy in tiền.
 
-## Roadmap gợi ý
+## Đã có trong bản này (nâng cấp theo các dự án tương tự)
+
+Tham khảo pattern từ **LiteLLM** (router/fallback/retry/cost), **AutoGPT / Hermes / agno /
+OpenManus** (tool access, chạy liên tục, bộ nhớ):
+
+- ✅ Retry + exponential backoff, cooldown, xử lý 429/auth theo từng provider.
+- ✅ Ước tính chi phí USD + giới hạn ngân sách/ngày + cache prompt.
+- ✅ ToolAgent kiểu **ReAct** (provider-agnostic, chạy cả với local model nhỏ).
+- ✅ Bộ tool an toàn (calculator/read_file sandbox/web_search/http_get).
+- ✅ **Autopilot** scheduler + bộ nhớ bền vững để chạy workflow tự động có guardrail.
+
+## Roadmap gợi ý tiếp theo
 
 - Thêm provider free khác (Cerebras, Together) — chỉ cần thêm block vào config.
-- Tool-use thật cho agent (web search, đọc file) qua interface tool.
-- Hàng đợi job + scheduler để chạy workflow định kỳ.
-- Tích hợp Stripe cho hướng SaaS.
+- Multi-agent "crew" (nhiều persona) cho phân tích trading (kiểu ai-hedge-fund).
+- Tích hợp Stripe + auth cho hướng SaaS để bán subscription thật.
+- Vector memory (embeddings) thay cho memory JSONL hiện tại.

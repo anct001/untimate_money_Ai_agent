@@ -1,12 +1,15 @@
 """Command line interface.
 
-    python -m moneyagent providers          # show provider status & quota
-    python -m moneyagent chat "..."          # one-off prompt through the router
-    python -m moneyagent content --topic ... # draft client content
+    python -m moneyagent providers           # show provider status, quota & cost
+    python -m moneyagent chat "..."           # one-off prompt (plan/draft/review)
+    python -m moneyagent agent "..."          # tool-using ReAct agent (web/calc/...)
+    python -m moneyagent tools                # list available agent tools
+    python -m moneyagent content --topic ...  # draft client content
     python -m moneyagent signals --ticker BTC-USD
-    python -m moneyagent ledger              # show progress toward the goal
+    python -m moneyagent ledger               # show progress toward the goal
     python -m moneyagent ledger --add --source content --desc "blog x" --amount 150
-    python -m moneyagent serve               # run the SaaS API (needs fastapi)
+    python -m moneyagent autopilot --jobs config/jobs.yaml   # run jobs on a schedule
+    python -m moneyagent serve                # run the SaaS API (needs fastapi)
 """
 from __future__ import annotations
 
@@ -15,25 +18,39 @@ import json
 import logging
 import sys
 
-from .agent import Agent
-from .config import load_config
+from .agent import Agent, ToolAgent
+from .cache import PromptCache
+from .config import Config, load_config
 from .ledger import Ledger
 from .router import LLMRouter
+from .tools import default_registry
 from .workflows.content import ContentWorkflow
 from .workflows.trading_signals import TradingSignalsWorkflow
 
 
-def _router(args) -> LLMRouter:
-    cfg = load_config()
+def build_router(cfg: Config) -> LLMRouter:
     cfg.ensure_dirs()
-    return LLMRouter(cfg)
+    rcfg = cfg.router or {}
+    cache = PromptCache(cfg.data_dir / "cache.json", enabled=bool(rcfg.get("cache", True)))
+    return LLMRouter(
+        cfg,
+        max_retries=int(rcfg.get("max_retries", 2)),
+        cooldown_seconds=float(rcfg.get("cooldown_seconds", 30)),
+        daily_budget_usd=float(rcfg.get("daily_budget_usd", 0)),
+        cache=cache,
+    )
+
+
+def _router(args) -> LLMRouter:
+    return build_router(load_config())
 
 
 def cmd_providers(args) -> int:
     router = _router(args)
     rows = router.status()
     print(json.dumps(rows, indent=2))
-    usable = [r for r in rows if r["available"] and not r["at_limit"]]
+    usable = [r for r in rows if r["skip_reason"] is None]
+    print(f"\nTotal est. cost today: ${router.usage.cost_today():.6f}")
     if not usable:
         print(
             "\n⚠  No usable provider. Either run Ollama locally, or set an API key "
@@ -41,7 +58,7 @@ def cmd_providers(args) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"\n✓ {len(usable)} provider(s) ready: {', '.join(r['name'] for r in usable)}")
+    print(f"✓ {len(usable)} provider(s) ready: {', '.join(r['name'] for r in usable)}")
     return 0
 
 
@@ -55,6 +72,45 @@ def cmd_chat(args) -> int:
         for a in router.last_attempts:
             mark = "✓" if a.ok else "✗"
             print(f"  {mark} {a.provider}/{a.model} {a.error or ''}", file=sys.stderr)
+    return 0
+
+
+def cmd_agent(args) -> int:
+    cfg = load_config()
+    router = build_router(cfg)
+    registry = default_registry(workspace=cfg.root, allow_network=not args.no_network)
+    agent = ToolAgent(router, registry, max_steps=args.max_steps)
+    result = agent.run(args.task)
+    print(result.answer)
+    if args.verbose:
+        print(f"\n--- transcript ({result.steps} steps) ---", file=sys.stderr)
+        for line in result.transcript:
+            print(line, file=sys.stderr)
+    return 0
+
+
+def cmd_tools(args) -> int:
+    cfg = load_config()
+    registry = default_registry(workspace=cfg.root, allow_network=not args.no_network)
+    print(registry.describe())
+    return 0
+
+
+def cmd_autopilot(args) -> int:
+    from .jobs import Autopilot, load_jobs
+
+    cfg = load_config()
+    jobs = load_jobs(args.jobs)
+    if not jobs:
+        print("No jobs found in the file.", file=sys.stderr)
+        return 1
+    pilot = Autopilot(cfg, router=build_router(cfg))
+    if args.once:
+        for job in jobs:
+            path = pilot.run_once(job)
+            print(f"{job.name} -> {path}")
+        return 0
+    pilot.run_forever(jobs, max_iterations=args.max_iterations)
     return 0
 
 
@@ -140,6 +196,16 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--fast", action="store_true", help="skip self-review pass")
     c.set_defaults(func=cmd_chat)
 
+    ag = sub.add_parser("agent", help="tool-using ReAct agent")
+    ag.add_argument("task")
+    ag.add_argument("--max-steps", type=int, default=6)
+    ag.add_argument("--no-network", action="store_true", help="disable web/http tools")
+    ag.set_defaults(func=cmd_agent)
+
+    tl = sub.add_parser("tools", help="list available agent tools")
+    tl.add_argument("--no-network", action="store_true")
+    tl.set_defaults(func=cmd_tools)
+
     ct = sub.add_parser("content", help="draft client content")
     ct.add_argument("--topic", required=True)
     ct.add_argument("--kind", default="blog post")
@@ -161,6 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
     lg.add_argument("--amount", type=float)
     lg.add_argument("--status", default="invoiced", choices=["invoiced", "paid"])
     lg.set_defaults(func=cmd_ledger)
+
+    ap = sub.add_parser("autopilot", help="run workflows on a schedule")
+    ap.add_argument("--jobs", required=True, help="path to a jobs YAML file")
+    ap.add_argument("--once", action="store_true", help="run each job once and exit")
+    ap.add_argument("--max-iterations", type=int, default=0, help="0 = unlimited")
+    ap.set_defaults(func=cmd_autopilot)
 
     sv = sub.add_parser("serve", help="run the SaaS automation API")
     sv.add_argument("--host", default="127.0.0.1")

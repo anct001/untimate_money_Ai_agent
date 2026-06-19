@@ -1,0 +1,28 @@
+# Autopilot jobs. Run with:  python -m moneyagent autopilot --jobs config/jobs.yaml
+# Each job runs its workflow every `every_seconds`, up to `max_runs` times
+# (0 = unlimited). Outputs land in outputs/ for you to review before delivery.
+jobs:
+  - name: daily_blog_draft
+    workflow: content
+    every_seconds: 86400        # once a day
+    max_runs: 0
+    params:
+      topic: "Practical tips for personal productivity"
+      kind: "blog post"
+      words: 700
+      language: English
+
+  - name: btc_signal_brief
+    workflow: signals
+    every_seconds: 21600        # every 6 hours
+    max_runs: 0
+    params:
+      ticker: "BTC-USD"          # needs `pip install yfinance`, or pass `prices`
+      period: "3mo"
+
+  - name: morning_summary
+    workflow: chat
+    every_seconds: 86400
+    max_runs: 0
+    params:
+      task: "Draft a short checklist of outreach actions to find 1 new client today."

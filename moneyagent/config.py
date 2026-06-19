@@ -71,6 +71,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ],
     "paths": {"data_dir": "data", "output_dir": "outputs"},
     "goal": {"monthly_target_usd": 10000},
+    "router": {
+        "max_retries": 2,
+        "cooldown_seconds": 30,
+        "daily_budget_usd": 0,   # 0 = no cap; raise this only if using paid models
+        "cache": True,
+    },
 }
 
 
@@ -90,6 +96,7 @@ class Config:
     providers: list[dict] = field(default_factory=list)
     paths: dict[str, str] = field(default_factory=dict)
     goal: dict[str, Any] = field(default_factory=dict)
+    router: dict[str, Any] = field(default_factory=dict)
     root: Path = field(default_factory=Path.cwd)
 
     @property
@@ -130,5 +137,6 @@ def load_config(path: str | os.PathLike | None = None, root: str | os.PathLike |
         providers=merged.get("providers", []),
         paths=merged.get("paths", {}),
         goal=merged.get("goal", {}),
+        router=merged.get("router", {}),
         root=root_path,
     )
