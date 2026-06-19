@@ -1,18 +1,19 @@
 """Billing & metering for the SaaS workflow.
 
 Honest, incremental monetization for the SaaS path:
-  * API-key auth with per-key plans.
+  * API-key auth with per-key plans (self-serve signup issues a free key).
   * Monthly request quotas per plan (persisted) + a simple per-minute rate limit.
-  * Optional Stripe checkout — the service runs free (no Stripe) in dev, and you
-    flip on charging by setting STRIPE_API_KEY when you're ready.
+  * Optional Stripe Checkout + webhook that auto-upgrades a key's plan on payment.
 
-Nothing here makes network calls unless you explicitly call the Stripe helper
-with a configured key, so it's safe to import and test offline.
+Nothing here makes network calls unless you explicitly call a Stripe helper with
+a configured key, so it's safe to import and test offline. Stripe is opt-in:
+set STRIPE_API_KEY (+ STRIPE_WEBHOOK_SECRET) only when you're ready to charge.
 """
 from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from collections import deque
 from datetime import datetime
@@ -26,39 +27,71 @@ PLANS: dict[str, dict] = {
 }
 
 
-class KeyStore:
-    """Maps API keys to {'plan': ..., 'label': ...}."""
+def generate_key() -> str:
+    return "ma-" + secrets.token_urlsafe(24)
 
-    def __init__(self, keys: dict[str, dict] | None = None) -> None:
+
+class KeyStore:
+    """Maps API keys to {'plan': ..., 'label': ..., 'email'?: ...}.
+
+    File-backed (provisioned/upgraded keys persist). Keys supplied via the
+    MONEYAGENT_API_KEYS env var are overlaid at load time but not written back.
+    """
+
+    def __init__(self, keys: dict[str, dict] | None = None, path: Path | None = None) -> None:
         self.keys = keys or {}
+        self.path = Path(path) if path else None
 
     @classmethod
     def from_env_or_file(cls, path: Path | None = None) -> KeyStore:
-        """Load keys from MONEYAGENT_API_KEYS env ("key:plan,key2:plan") or a JSON file.
-
-        If neither is set, mint a single dev key so the service is usable locally.
-        """
         keys: dict[str, dict] = {}
+        if path and Path(path).exists():
+            try:
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+                for key, rec in data.items():
+                    rec.setdefault("plan", "free")
+                    keys[key] = rec
+            except (json.JSONDecodeError, OSError):
+                pass
+
         env = os.getenv("MONEYAGENT_API_KEYS", "").strip()
         if env:
             for pair in env.split(","):
                 if ":" in pair:
-                    key, plan = pair.split(":", 1)
-                    key, plan = key.strip(), plan.strip()
+                    key, plan = (x.strip() for x in pair.split(":", 1))
                     keys[key] = {"plan": plan if plan in PLANS else "free", "label": "env"}
-        elif path and Path(path).exists():
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-            for key, rec in data.items():
-                rec.setdefault("plan", "free")
-                keys[key] = rec
 
         if not keys:
-            dev_key = "dev-" + os.urandom(6).hex()
-            keys[dev_key] = {"plan": "pro", "label": "auto-dev"}
-        return cls(keys)
+            dev = generate_key()
+            keys[dev] = {"plan": "pro", "label": "auto-dev"}
+        return cls(keys, path)
 
     def verify(self, key: str) -> dict | None:
         return self.keys.get((key or "").strip())
+
+    def save(self) -> None:
+        """Persist provisioned keys (skip ephemeral env/auto-dev entries)."""
+        if not self.path:
+            return
+        persist = {k: v for k, v in self.keys.items() if v.get("label") not in ("env", "auto-dev")}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(persist, indent=2), encoding="utf-8")
+
+    def add(self, plan: str = "free", *, label: str = "signup", email: str | None = None) -> str:
+        key = generate_key()
+        rec = {"plan": plan if plan in PLANS else "free", "label": label}
+        if email:
+            rec["email"] = email
+        self.keys[key] = rec
+        self.save()
+        return key
+
+    def set_plan(self, key: str, plan: str) -> bool:
+        if key in self.keys and plan in PLANS:
+            self.keys[key]["plan"] = plan
+            self.save()
+            return True
+        return False
 
 
 class UsageMeter:
@@ -110,14 +143,23 @@ class UsageMeter:
         return False
 
 
-def create_checkout_session(plan: str, success_url: str, cancel_url: str) -> dict:
+# --- Stripe helpers (opt-in; importing stripe lazily) ---------------------
+
+def create_checkout_session(
+    plan: str,
+    success_url: str,
+    cancel_url: str,
+    client_reference_id: str | None = None,
+) -> dict:
     """Create a Stripe Checkout session for a plan. Requires STRIPE_API_KEY.
 
-    Returns {'url': ...} to redirect the customer to. Raises if Stripe isn't
-    configured/installed — so charging is strictly opt-in.
+    `client_reference_id` (the buyer's existing API key) is echoed back by the
+    webhook so we know which key to upgrade. Raises if Stripe isn't configured.
     """
     if plan not in PLANS:
         raise ValueError(f"Unknown plan '{plan}'. Known: {sorted(PLANS)}")
+    if PLANS[plan]["price_usd"] <= 0:
+        raise ValueError("free plan does not require checkout; use /v1/signup")
     api_key = os.getenv("STRIPE_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("STRIPE_API_KEY not set; billing is disabled.")
@@ -129,6 +171,8 @@ def create_checkout_session(plan: str, success_url: str, cancel_url: str) -> dic
     stripe.api_key = api_key
     session = stripe.checkout.Session.create(
         mode="subscription",
+        client_reference_id=client_reference_id,
+        metadata={"plan": plan},
         line_items=[{
             "price_data": {
                 "currency": "usd",
@@ -142,3 +186,30 @@ def create_checkout_session(plan: str, success_url: str, cancel_url: str) -> dic
         cancel_url=cancel_url,
     )
     return {"url": session.url, "id": session.id}
+
+
+def construct_webhook_event(payload: bytes, sig_header: str, secret: str) -> dict:
+    """Verify and parse a Stripe webhook. Requires the signing secret."""
+    if not secret:
+        raise RuntimeError("STRIPE_WEBHOOK_SECRET not set")
+    try:
+        import stripe
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("pip install stripe to verify webhooks") from exc
+    return stripe.Webhook.construct_event(payload, sig_header, secret)
+
+
+def handle_checkout_completed(event: dict, keystore: KeyStore) -> str | None:
+    """On 'checkout.session.completed', upgrade the buyer's key to the paid plan.
+
+    Pure function over the event dict, so it's unit-testable without Stripe.
+    Returns the upgraded key, or None if the event isn't actionable.
+    """
+    if event.get("type") != "checkout.session.completed":
+        return None
+    obj = event.get("data", {}).get("object", {})
+    key = obj.get("client_reference_id")
+    plan = (obj.get("metadata") or {}).get("plan", "starter")
+    if key and keystore.verify(key) and keystore.set_plan(key, plan):
+        return key
+    return None

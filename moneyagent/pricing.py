@@ -17,6 +17,9 @@ PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "gemini-2.0-flash-lite": (0.0, 0.0),
     "gemini-2.0-flash": (0.0, 0.0),
     "meta-llama/llama-3.3-70b-instruct:free": (0.0, 0.0),
+    "llama3.1-8b": (0.0, 0.0),
+    "llama-3.3-70b": (0.0, 0.0),
+    "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free": (0.0, 0.0),
     # Examples of paid fallbacks (so budget guard has teeth if you add them).
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.0),

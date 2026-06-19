@@ -43,11 +43,48 @@ def test_usage_with_valid_key(monkeypatch, tmp_path):
     assert body["used_this_month"] == 0
 
 
-def test_checkout_disabled_without_stripe(monkeypatch, tmp_path):
-    monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+def test_landing_page(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "moneyagent" in resp.text
+    assert "Get free API key" in resp.text
+
+
+def test_signup_issues_free_key(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    resp = client.post("/v1/signup", json={"email": "a@b.com"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["plan"] == "free"
+    assert body["api_key"].startswith("ma-")
+    # the new key works for authenticated endpoints
+    usage = client.get("/v1/usage", headers={"X-API-Key": body["api_key"]})
+    assert usage.status_code == 200
+
+
+def test_checkout_requires_auth(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
     resp = client.post(
         "/v1/checkout",
         json={"plan": "pro", "success_url": "https://x/s", "cancel_url": "https://x/c"},
     )
+    assert resp.status_code == 401  # needs an API key
+
+
+def test_checkout_disabled_without_stripe(monkeypatch, tmp_path):
+    monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+    client = _client(monkeypatch, tmp_path)
+    resp = client.post(
+        "/v1/checkout",
+        headers={"X-API-Key": "testkey"},
+        json={"plan": "pro", "success_url": "https://x/s", "cancel_url": "https://x/c"},
+    )
     assert resp.status_code == 400  # billing not configured
+
+
+def test_webhook_without_secret(monkeypatch, tmp_path):
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    client = _client(monkeypatch, tmp_path)
+    resp = client.post("/v1/webhook", content=b"{}", headers={"Stripe-Signature": "x"})
+    assert resp.status_code == 400

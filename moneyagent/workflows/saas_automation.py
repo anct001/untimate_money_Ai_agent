@@ -65,12 +65,23 @@ def create_app():  # pragma: no cover - exercised only when FastAPI is installed
     `pip install fastapi uvicorn` (and `stripe` if you enable billing).
     """
     try:
-        from fastapi import Depends, FastAPI, Header, HTTPException
+        from fastapi import Depends, FastAPI, Header, HTTPException, Request
+        from fastapi.responses import HTMLResponse
         from pydantic import BaseModel
     except ImportError as exc:
         raise RuntimeError("pip install fastapi uvicorn to serve the SaaS app") from exc
 
-    from ..billing import PLANS, KeyStore, UsageMeter, create_checkout_session
+    import os
+
+    from ..billing import (
+        PLANS,
+        KeyStore,
+        UsageMeter,
+        construct_webhook_event,
+        create_checkout_session,
+        handle_checkout_completed,
+    )
+    from .landing import render_landing
 
     cfg = load_config()
     cfg.ensure_dirs()
@@ -89,6 +100,9 @@ def create_app():  # pragma: no cover - exercised only when FastAPI is installed
         input_text: str
         instructions: str = ""
 
+    class SignupIn(BaseModel):
+        email: str = ""
+
     class CheckoutIn(BaseModel):
         plan: str
         success_url: str
@@ -105,9 +119,19 @@ def create_app():  # pragma: no cover - exercised only when FastAPI is installed
             raise HTTPException(status_code=402, detail="monthly plan limit reached; upgrade plan")
         return x_api_key, rec
 
+    @app.get("/", response_class=HTMLResponse)
+    def landing():
+        return render_landing(PLANS, sorted(JOB_PROMPTS))
+
     @app.get("/health")
     def health():
         return {"status": "ok", "jobs": sorted(JOB_PROMPTS), "plans": sorted(PLANS)}
+
+    @app.post("/v1/signup")
+    def signup(body: SignupIn):
+        # Self-serve free tier: instantly issue a key. No payment required.
+        key = keystore.add("free", label="signup", email=body.email or None)
+        return {"api_key": key, "plan": "free", "limits": PLANS["free"]}
 
     @app.post("/v1/run")
     def run(body: JobIn, auth=Depends(authenticate)):
@@ -132,10 +156,24 @@ def create_app():  # pragma: no cover - exercised only when FastAPI is installed
         }
 
     @app.post("/v1/checkout")
-    def checkout(body: CheckoutIn):
+    def checkout(body: CheckoutIn, auth=Depends(authenticate)):
+        key, _rec = auth  # the buyer's existing (free) key; webhook upgrades it
         try:
-            return create_checkout_session(body.plan, body.success_url, body.cancel_url)
+            return create_checkout_session(
+                body.plan, body.success_url, body.cancel_url, client_reference_id=key
+            )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/webhook")
+    async def stripe_webhook(request: Request, stripe_signature: str = Header(default="")):
+        secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+        payload = await request.body()
+        try:
+            event = construct_webhook_event(payload, stripe_signature, secret)
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        upgraded = handle_checkout_completed(event, keystore)
+        return {"received": True, "upgraded": bool(upgraded)}
 
     return app
